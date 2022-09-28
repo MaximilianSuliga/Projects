@@ -1,0 +1,2300 @@
+---
+title: "Covid19 project"
+author: "Karim Abd El Salam, Maximilian Suliga"
+output:
+  html_document:
+    theme: spacelab
+    highlight: tango
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+```{r}
+knitr::opts_chunk$set(fig.width=12, fig.height=8) 
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = TRUE, 
+                      cache   = TRUE,
+                      message = FALSE, 
+                      warning = FALSE)
+```
+
+
+
+## Forecast of COVID-19 cases in France and Italy using VAR and ARIMA models
+
+First of all, we need to load all the packages that we need
+
+```{r Packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(xts)
+library(lmtest)
+library(tseries)
+library(urca)
+library(fUnitRoots)
+library(quantmod)
+library(vars)
+library(kableExtra)
+library(knitr)
+library(formattable)
+library(forecast)
+library(tsbox)
+source("C:/Users/Karim/Desktop/Università/Erasmus - Time Series Analysis/funs/function_plot_ACF_PACF_resids.R", local=TRUE)
+```
+
+And
+
+```{r message=FALSE, warning=FALSE}
+options(scipen=999)
+#setwd("C:/Users/Karim/Desktop/Università/Erasmus - Time Series Analysis")
+```
+
+```{r cache = F, test_chunk}
+source("C:/Users/Karim/Desktop/Università/Erasmus - Time Series Analysis/testdf.R", local=TRUE)
+#source("funs/testdf.R")
+
+```
+
+Let's Upload and examine the data:
+
+```{r paged.print=TRUE}
+
+data <- read.csv("https://opendata.ecdc.europa.eu/covid19/nationalcasedeath_eueea_daily_ei/csv", na.strings = "", fileEncoding = "UTF-8-BOM")
+head(data)
+tail(data)
+unique(data$countriesAndTerritories)
+```
+
+Select only the countries that we are interested to:
+```{r message=FALSE, warning=FALSE}
+France = data[data$countriesAndTerritories == 'France', ]
+Italy = data[data$countriesAndTerritories == 'Italy', ]
+
+```
+
+And see how they look like:
+```{r}
+head(France)
+head(Italy)
+```
+
+From the output we notice that they are quite messy, we need to order them:
+
+```{r message=FALSE, warning=FALSE}
+France=France[,c(1,5)]
+Italy=Italy[,c(1,5)]
+
+France=France[order(nrow(France):1),]
+Italy=Italy[order(nrow(Italy):1),]
+
+
+rownames(France)=1:nrow(France)
+rownames(Italy)=1:nrow(Italy)
+
+France=France[-c(1:32),]
+rownames(France)=1:nrow(France)
+```
+
+Way better:
+
+```{r}
+head(Italy)
+head(France)
+tail(Italy)
+tail(France)
+```
+
+Convert the data in XTS, format and order by date:
+
+```{r message=FALSE, warning=FALSE}
+
+France$dateRep = as.Date(France$dateRep, format = "%d/%m/%Y")
+France = xts(France[, -1], order.by =France$dateRep)
+colnames(France)="Cases in France"
+
+
+Italy$dateRep=as.Date(Italy$dateRep, format = "%d/%m/%Y")
+Italy=xts(Italy[,-1], order.by = Italy$dateRep)
+colnames(Italy)="Cases in Italy"
+
+
+```
+
+
+Let's see if there is any missing or negative values in the data
+
+```{r}
+
+any(is.na(France))
+any(is.na(Italy))
+any(is.nan(France))
+any(is.nan(Italy))
+any(is.infinite(France))
+any(is.infinite(Italy))
+
+any(France<0)
+any(Italy<0)
+
+```
+
+There are some negative values, we will consider them as zeros
+
+```{r}
+France[France$`Cases in France`<0] =0
+Italy[Italy$`Cases in Italy`<0]=0
+
+```
+
+# Let's plot the data:
+```{r}
+
+plot(France,
+     col = c("black"),     
+     major.ticks = "years", 
+     grid.ticks.on = "years",
+     grid.ticks.lty = 3,
+     main = "France covid cases",)
+
+plot(Italy,
+     col = c("black"),     
+     major.ticks = "years", 
+     grid.ticks.on = "years",
+     grid.ticks.lty = 3,
+     main = "Italy covid cases",)
+
+
+```
+
+
+
+
+Create a new DataFrame with all the datas merged and plot it to see the 
+differences
+
+```{r}
+France_Italy=merge(France,Italy)
+
+plot(France_Italy,
+     col = c("black", "blue"),     
+     major.ticks = "years", 
+     grid.ticks.on = "years",
+     grid.ticks.lty = 3,
+     main = "France and Italy covid cases",
+     legend.loc = "topleft")
+
+```
+
+
+# Integration order
+
+
+
+As we can see from the ADF test below, both the time series rejects the 
+Breusch-Godfrey for 1 augumentation. That means the residuals are 
+autocorrelated.
+With already two and especially three augmentation, the value of the BG test is much better and the ADF test conclude that the series is stationary with two augumentations. This allows us to test significance of parameters as well as cointegration and long-run relationships.
+```{r warning=FALSE}
+
+testdf(France, max.augmentations = 3)
+testdf(Italy, max.augmentations = 3)
+
+
+```
+
+
+Because of the difference of the covid cases between the beginning and the end of the dataset, we think that to make better forecast could be usefull to use cut data. we will use both dataset to see which one perform better. To make sure that no NAs are available in the dataset (as some recent data may be available for one country, but not for the other), we also cut both datasets until the first of July 2022.
+```{r}
+France_Italy_cut = France_Italy["2022-01-01/"] 
+France_Italy_cut = France_Italy_cut["/2022-07-01"] 
+France_Italy = France_Italy["/2022-07-01"] 
+
+head(France_Italy_cut)
+tail(France_Italy_cut)
+
+```
+
+With no difference the cut data are stationary with one augumentation. Because
+the BG test shows no autocorrelation between residuals and the p-values
+of the ADF test of France is below the critical value of 0.05, for Italy is p_adf is higher for just 0.021.
+
+```{r}
+testdf(France_Italy_cut$Cases.in.France, max.augmentations = 3)
+testdf(France_Italy_cut$Cases.in.Italy, max.augmentations = 3)
+
+```
+
+
+From this plot is already visible a seasonal effect in the data.
+```{r}
+plot(France_Italy_cut[,1:2],
+     col = c("black", "blue"),     
+     major.ticks = "months", 
+     grid.ticks.on = "weeks",
+     grid.ticks.lty = 3,
+     main = "France and Italy covid cases",
+     legend.loc = "topleft")
+
+```
+# Granger Causality
+
+Let's check now the Granger Causality for the **cut data**.
+It's possible to notice that Italy Granger causes France for all lags, meanwhile France Granger causes Italy for lag n. 6 to 14.
+
+Because both the variable Granger causes each other from the lag n.6, we can consider them endogenous. That means when we run a VAR model we should consider only these lags because this type of model consider both variable as endogenous by default.
+```{r}
+
+for (i in 1:14){
+        cat('\n results for France caused by Italy with', i, 'lags\n')
+        
+        print(grangertest(Cases.in.France ~ Cases.in.Italy,
+                          data = France_Italy_cut,
+                          order = i))
+}
+       
+for (i in 1:14){        
+        cat('\n results for Italy caused by France with', i, 'lags\n')
+       
+        print(grangertest(Cases.in.Italy ~ Cases.in.France,
+                          data = France_Italy_cut,
+                          order = i))
+        
+}
+
+```
+
+
+Interesting to notice that for the **non-cut data**, Italy and France Granger causes each other for all the lags selected.
+
+
+```{r}
+for (i in 1:14){
+        cat('\n results for France caused by Italy with', i, 'lags\n')
+        
+        print(grangertest(Cases.in.France ~ Cases.in.Italy,
+                          data = France_Italy,
+                          order = i))
+}
+       7
+for (i in 1:14){        
+        cat('\n results for Italy caused by France with', i, 'lags\n')
+       
+        print(grangertest(Cases.in.Italy ~ Cases.in.France,
+                          data = France_Italy,
+                          order = i))
+        
+}
+```
+
+To summarize we can notice that the p-value is very low for certain lags
+this means that we can reject the null hypotesis of Granger test, which means
+that coefficients for certain lags are not equal to zero and so they are 
+significant. 
+
+The p-value is lower than critical value 0.05 for the **cut data**:
+1) France Granger causes Italy for lags: 6,7,8,9,10,11,12,13,14
+2) Italy Granger causes France for lags: 1 to 14
+
+The p-value is lower than critical value 0.05 for the **uncut data**:
+1) France Granger causes Italy for lags: 1 to 14
+2) Italy Granger causes France for lags: 1 to 14
+
+The results suggest a bi-directional Granger causality. This justifies the use of a VAR model, as one might question
+how a VAR model may be more beneficial than two individual models when there is no relationship between the variables
+considered.
+For the cut data the bi-directional exist from lag 6, for the uncut data exist fo all the lags. 
+We can treat both the variable as endogenous. The values of Covid cases in Italy make the 
+explanation of the variability of Covid cases in France better, and 
+in the opposite direction happens the same.
+we can proceed to estimate the VAR models and analize the Information Criteria:
+
+
+We will use this dataset:
+**Cut data**
+```{r}
+cut_data=merge(France_Italy_cut$Cases.in.France,France_Italy_cut$Cases.in.Italy)
+```
+
+**Uncut data**
+```{r}
+uncut_data=merge(France_Italy$Cases.in.France,France_Italy$Cases.in.Italy)
+```
+
+
+# VAR specification
+
+Analyze the Information criteria for suggested lags in the **cut** data:
+
+11 and 9 lags are suggested.
+```{r}
+
+VARselect(cut_data, lag.max = 14) %>%
+        .$criteria %>% 
+        t() %>% 
+        as_tibble() %>% 
+        mutate(nLags = 1:nrow(.)) %>%
+        kbl(digits = 3) %>%
+        kable_classic("striped", full_width = F)
+
+```
+
+Analyze the Information criteria for suggested lags in the **uncut** data:
+
+11 and 13 lags are suggested
+```{r}
+VARselect(uncut_data, lag.max = 14) %>%
+        .$criteria %>% 
+        t() %>% 
+        as_tibble() %>% 
+        mutate(nLags = 1:nrow(.)) %>%
+        kbl(digits = 3) %>%
+        kable_classic("striped", full_width = F)
+```
+Analyze the Information criteria for suggested lags in the **cut** data with **seasonal dummies**:
+
+Due to potential seasonality, seasonal dummies must to be included.
+11 and 8  lags are suggested.
+
+```{r}
+
+VARselect(cut_data, lag.max = 14, season = 7) %>%
+        .$criteria %>% 
+        t() %>% 
+        as_tibble() %>% 
+        mutate(nLags = 1:nrow(.)) %>%
+        kbl(digits = 3) %>%
+        kable_classic("striped", full_width = F)
+
+```
+
+Analyze the Information criteria for suggested lags in the **uncut** data with **seasonal dummies**:
+
+Due to potential seasonality, seasonal dummies must to be included.
+11, 13 and 14  lags are suggested.
+```{r}
+VARselect(uncut_data, lag.max = 14, season = 7) %>%
+        .$criteria %>% 
+        t() %>% 
+        as_tibble() %>% 
+        mutate(nLags = 1:nrow(.)) %>%
+        kbl(digits = 3) %>%
+        kable_classic("striped", full_width = F)
+```
+
+Checking the ACF and PACF for both of the time series **uncut**, it's easy to assess that there is effectively a seasonality in the data.
+
+```{r}
+acf(uncut_data$Cases.in.France,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(uncut_data$Cases.in.France, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+```{r}
+acf(uncut_data$Cases.in.Italy,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(uncut_data$Cases.in.Italy, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+Similar is for the **cut** time series
+
+```{r}
+acf(cut_data$Cases.in.France,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(cut_data$Cases.in.France, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+```{r}
+acf(cut_data$Cases.in.Italy,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(cut_data$Cases.in.Italy, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+
+It's clear that for both time series there exist a seasonal effect.
+Because our data are daily, there is a seasonal effect every week.
+Let's try some VAR models with seasonal dummies for both dataset cut and uncut. Then we will check which one is the best.
+We decided on the parameters by making a judgement on both Information criteria as well ACF and PACF plots.
+
+# Var for Uncut data 
+Let's estimate some VAR models for the **uncut** time series.
+
+VAR 11 with and without 7 seasonal dummies
+```{r}
+
+uncut_france_italy_var11.7=VAR(uncut_data,
+                               p = 11, type = "none",
+                      season = 7)
+summary(uncut_france_italy_var11.7)
+
+```
+```{r}
+uncut_france_italy_var11=VAR(uncut_data,
+                               p = 11, type = "none")
+summary(uncut_france_italy_var11)
+```
+
+
+Let's plot the results.
+
+VAR11 with 7 seasonal dummies:
+```{r}
+plot(uncut_france_italy_var11.7)
+
+```
+
+
+VAR11 without seasonal dummies:
+```{r}
+
+plot(uncut_france_italy_var11)
+```
+
+
+# Var for Cut data 
+Let's now estimate some VAR models for the **cut** time series.
+
+VAR 8 with and without 7 seasonal dummies. In this case we consider the constant
+because it's significant.
+```{r}
+
+cut_france_italy_var8.7=VAR(cut_data,
+                               p = 8, 
+                      season = 7)
+summary(cut_france_italy_var8.7)
+
+
+```
+
+
+```{r}
+cut_france_italy_var8=VAR(cut_data,
+                               p = 8)
+summary(cut_france_italy_var8)
+
+
+```
+
+
+
+Let's plot the results.
+
+VAR8 with 7 seasonal dummies:
+```{r}
+plot(cut_france_italy_var8.7)
+
+```
+
+VAR8 without seasonal dummies:
+```{r}
+plot(cut_france_italy_var8)
+```
+
+
+
+# Correlation between residuals
+Let's check now the correlation between residuals for all the models estimated, using the Breusch–Godfrey test
+```{r}
+
+serial.test(uncut_france_italy_var11, type = "BG")
+serial.test(uncut_france_italy_var11.7, type = "BG")
+serial.test(cut_france_italy_var8, type = "BG")
+serial.test(cut_france_italy_var8.7, type = "BG")
+
+```
+
+
+Let's now use the Portmanteau test
+```{r}
+serial.test(uncut_france_italy_var11, type = "PT.adjusted")
+serial.test(uncut_france_italy_var11.7, type = "PT.adjusted")
+serial.test(cut_france_italy_var8, type = "PT.adjusted")
+serial.test(cut_france_italy_var8.7, type = "PT.adjusted")
+```
+P-Value are very low in both tests, so there is correlation between residuals for all the models. It's very hard to find no autocorrelation between residuals. 
+Also by trying different VAR models the correlation between residuals will persist.
+We are aiming primarily to have good forecast, so we move on.
+
+# Information Criteria
+Let's compare them with AIC and BIC info criteria:
+
+The best models seems these that were estimated with the cut data.
+```{r}
+
+AIC(uncut_france_italy_var11,uncut_france_italy_var11.7,cut_france_italy_var8,cut_france_italy_var8.7)
+BIC(uncut_france_italy_var11,uncut_france_italy_var11.7,cut_france_italy_var8,cut_france_italy_var8.7)
+```
+
+# Impulse Response Functions
+Let's examine the "Impulse Response Functions" for the final VAR specification.
+This function is usefull to know if our model is stable. To do that we simulate
+some shocks in the residuals and check in how many periods the model will stabilize
+
+VAR11 for the **uncut** data without seasonal dummies:
+
+```{r}
+plot(irf(uncut_france_italy_var11, n.ahead = 36))
+
+```
+
+VAR11 for the **uncut** data with seasonal dummies:
+
+```{r}
+plot(irf(uncut_france_italy_var11.7, n.ahead = 36))
+
+```
+Both plots are very bad, because we can easily see that the shock simulated in the error term for both variables, makes the model unstable, because it's not gradually dying away.
+
+Let's analyze if the same will happen for the var 8 with and without seasonal dummies for the cut data.
+
+VAR8 for the **cut** data without seasonal dummies:
+```{r}
+plot(irf(cut_france_italy_var8, n.ahead = 36))
+```
+
+
+VAR8 for the **cut** data with seasonal dummies:
+```{r}
+plot(irf(cut_france_italy_var8.7, n.ahead = 36))
+```
+In this case the models seems to react better to the shocks in the residuals. Especially for the variable "Cases.in.France".
+
+
+
+# Forecast Error Variance Decomposition
+Let's now examine the "Forecast Error Variance Decomposition" to explain the dynamic of the VAR models.
+These graphs will shown us the portion of the forecast error of the dependent variables related to their own shocks and to shocks of the other variable. 
+
+
+VAR11 for the **uncut** data without seasonal dummies:
+```{r}
+
+plot(fevd(uncut_france_italy_var11, n.ahead = 14))
+
+```
+
+VAR11 for the **uncut** data with seasonal dummies:
+```{r}
+
+plot(fevd(uncut_france_italy_var11.7, n.ahead = 14))
+
+```
+
+For the VAR11 with and without seasonal dummies it's we can asses that for the variable "Cases.in.France" the variance of the error is mostly explained by shocks of it self. Much different is for the variable "Cases.in.Italy" in which the variance of the error is explained by shocks to both variable.
+
+Let now see the VAR8 model for the cut data.
+
+VAR8 for the **cut** data without seasonal dummies:
+```{r}
+
+plot(fevd(cut_france_italy_var8, n.ahead = 14))
+
+```
+
+
+VAR8 for the **cut** data with seasonal dummies:
+```{r}
+
+plot(fevd(cut_france_italy_var8.7, n.ahead = 14))
+
+```
+
+The results are very similar to the VAR11 model for the uncut data.
+
+
+Let's prepare our "Out of sample" and "In sample" data for forecasting.
+
+
+```{r}
+
+out_sample_data=merge(France_Italy_cut$Cases.in.France, France_Italy_cut$Cases.in.Italy)
+
+in_sample_data_uncut=merge(France_Italy$Cases.in.France, France_Italy$Cases.in.Italy)
+in_sample_data_uncut = in_sample_data_uncut["/2022-05-17"] 
+
+
+in_sample_data_cut=merge(France_Italy_cut$Cases.in.France, France_Italy_cut$Cases.in.Italy)
+in_sample_data_cut = in_sample_data_cut["/2022-05-17"] 
+
+```
+
+
+
+Our two dataset are ready:
+1) In sample data from cut and uncut till 17/05/2022.
+3) Out of sample data from 18/05/2022 to 31/05/2022 (equals to 5% of total dataset, 28 observation).
+
+```{r}
+tail(in_sample_data_uncut)
+head(out_sample_data, n=28)
+
+
+```
+
+
+Let's estimate the VAR11 and VAR8 models with and without seasonal dummies for the in sample period:
+
+```{r}
+in_sample_data_var11.7 = VAR(in_sample_data_uncut,
+                        p = 11, 
+                        season = 7)
+in_sample_data_var11 = VAR(in_sample_data_uncut,
+                        p = 11)
+
+in_sample_data_var8.7 = VAR(in_sample_data_cut,
+                        p = 8, 
+                        season = 7)
+in_sample_data_var8 = VAR(in_sample_data_cut,
+                        p = 8)
+
+```
+
+
+
+
+
+
+# Forecast
+```{r}
+france_italy_var11.7_forecast= predict(in_sample_data_var11.7,
+                                    n.ahead = 14,
+                                    ci = 0.95)
+france_italy_var11_forecast= predict(in_sample_data_var11,
+                                    n.ahead = 14,
+                                    ci = 0.95)
+france_italy_var8.7_forecast= predict(in_sample_data_var8.7,
+                                    n.ahead = 14,
+                                    ci = 0.95)
+france_italy_var8_forecast= predict(in_sample_data_var8,
+                                    n.ahead = 14,
+                                    ci = 0.95)
+```
+
+
+
+Let's prepare our XTS file:
+
+VAR 11 with seasonal dummies for the **uncut** data.
+```{r}
+date1=seq(as.Date("2022-05-18"), as.Date("2022-05-31"), by="days")
+
+italy_forecast_var11.7 = xts(france_italy_var11.7_forecast$fcst$Cases.in.Italy[,-4], 
+                    order.by = date1)
+
+france_forecast_var11.7 = xts(france_italy_var11.7_forecast$fcst$Cases.in.France[,-4], 
+                        order.by = date1)
+
+
+names(italy_forecast_var11.7) = c("Italy.cases_fore", "Italy_lower", "Italy_upper")
+names(france_forecast_var11.7) = c("France.cases_fore", "France_lower", "France_upper")
+
+France_Italy_cut_onlycases= merge(France_Italy_cut$Cases.in.France,France_Italy_cut$Cases.in.Italy)
+
+Total_data_var11.7=merge(France_Italy_cut_onlycases,italy_forecast_var11.7,france_forecast_var11.7)
+```
+
+VAR 11 without seasonal dummies for the **uncut** data.
+```{r}
+date1=seq(as.Date("2022-05-18"), as.Date("2022-05-31"), by="days")
+
+italy_forecast_var11 = xts(france_italy_var11_forecast$fcst$Cases.in.Italy[,-4], 
+                    order.by = date1)
+
+france_forecast_var11 = xts(france_italy_var11_forecast$fcst$Cases.in.France[,-4], 
+                        order.by = date1)
+
+
+names(italy_forecast_var11) = c("Italy.cases_fore", "Italy_lower", "Italy_upper")
+names(france_forecast_var11) = c("France.cases_fore", "France_lower", "France_upper")
+
+France_Italy_cut_onlycases= merge(France_Italy_cut$Cases.in.France,France_Italy_cut$Cases.in.Italy)
+
+Total_data_var11=merge(France_Italy_cut_onlycases,italy_forecast_var11,france_forecast_var11)
+```
+
+VAR 8 with seasonal dummies for the **cut** data.
+```{r}
+date1=seq(as.Date("2022-05-18"), as.Date("2022-05-31"), by="days")
+
+italy_forecast_var8.7 = xts(france_italy_var8.7_forecast$fcst$Cases.in.Italy[,-4], 
+                    order.by = date1)
+
+france_forecast_var8.7 = xts(france_italy_var8.7_forecast$fcst$Cases.in.France[,-4], 
+                        order.by = date1)
+
+
+names(italy_forecast_var8.7) = c("Italy.cases_fore", "Italy_lower", "Italy_upper")
+names(france_forecast_var8.7) = c("France.cases_fore", "France_lower", "France_upper")
+
+France_Italy_cut_onlycases= merge(France_Italy_cut$Cases.in.France,France_Italy_cut$Cases.in.Italy)
+
+Total_data_var8.7=merge(France_Italy_cut_onlycases,italy_forecast_var8.7,france_forecast_var8.7)
+```
+
+VAR 8 without seasonal dummies for the **cut** data.
+```{r}
+date1=seq(as.Date("2022-05-18"), as.Date("2022-05-31"), by="days")
+
+italy_forecast_var8 = xts(france_italy_var8_forecast$fcst$Cases.in.Italy[,-4], 
+                    order.by = date1)
+
+france_forecast_var8 = xts(france_italy_var8_forecast$fcst$Cases.in.France[,-4], 
+                        order.by = date1)
+
+
+names(italy_forecast_var8) = c("Italy.cases_fore", "Italy_lower", "Italy_upper")
+names(france_forecast_var8) = c("France.cases_fore", "France_lower", "France_upper")
+
+France_Italy_cut_onlycases= merge(France_Italy_cut$Cases.in.France,France_Italy_cut$Cases.in.Italy)
+
+Total_data_var8=merge(France_Italy_cut_onlycases,italy_forecast_var8,france_forecast_var8)
+```
+
+
+Cutting the data:
+```{r}
+Total_data_var11.7=Total_data_var11.7["/2022-05-31"]
+Total_data_var11=Total_data_var11["/2022-05-31"]
+
+Total_data_var8.7=Total_data_var8.7["/2022-05-31"]
+Total_data_var8=Total_data_var8["/2022-05-31"]
+```
+
+# Plot of the forecast and actual values
+
+Plot of the actual values and forecast in **France, VAR11 with seasonal dummies**
+```{r}
+
+plot(Total_data_var11.7[, c("Cases.in.France", "France.cases_fore",
+                 "France_lower", "France_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, VAR 11 with 7 seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+
+```
+
+
+
+Plot of the actual values and forecast in **Italy, VAR11 with seasonal dummies**
+
+```{r}
+
+plot(Total_data_var11.7[, c("Cases.in.Italy", "Italy.cases_fore",
+                    "Italy_lower", "Italy_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, VAR 11 with 7 seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+
+```
+Plot of the actual values and forecast in **France, VAR11 without seasonal dummies**
+
+```{r}
+plot(Total_data_var11[, c("Cases.in.France", "France.cases_fore",
+                 "France_lower", "France_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, VAR11 without seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+```
+Plot of the actual values and forecast in **Italy, VAR11 without seasonal dummies**
+
+```{r}
+plot(Total_data_var11[, c("Cases.in.Italy", "Italy.cases_fore",
+                    "Italy_lower", "Italy_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, VAR11 without seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+```
+Plot of the actual values and forecast in **France, VAR8 with seasonal dummies**
+
+```{r}
+plot(Total_data_var8.7[, c("Cases.in.France", "France.cases_fore",
+                 "France_lower", "France_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, VAR8 with 7 seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+```
+
+Plot of the actual values and forecast in **Italy, VAR8 with seasonal dummies**
+```{r}
+plot(Total_data_var8.7[, c("Cases.in.Italy", "Italy.cases_fore",
+                    "Italy_lower", "Italy_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, VAR 8 with 7 seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+```
+Plot of the actual values and forecast in **France, VAR8 without seasonal dummies**
+
+```{r}
+plot(Total_data_var8[, c("Cases.in.France", "France.cases_fore",
+                 "France_lower", "France_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, VAR8 without seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+```
+Plot of the actual values and forecast in **Italy, VAR8 without seasonal dummies**
+
+```{r}
+plot(Total_data_var8[, c("Cases.in.Italy", "Italy.cases_fore",
+                    "Italy_lower", "Italy_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, VAR8 without seasonal dummies",
+     col = c("black", "blue", "red", "red"))
+```
+
+
+Forecast accuracy measures
+
+**VAR11 with 7 seasonal dummies.**
+
+Error measurement for France Covid-19 forecast:
+```{r}
+Total_data_var11.7$mae.France   =  abs(Total_data_var11.7$Cases.in.France - Total_data_var11.7$France.cases_fore)
+Total_data_var11.7$mse.France   =  (Total_data_var11.7$Cases.in.France - Total_data_var11.7$France.cases_fore) ^ 2
+Total_data_var11.7$mape.France  =  abs((Total_data_var11.7$Cases.in.France - Total_data_var11.7$France.cases_fore)/Total_data_var11.7$Cases.in.France)
+Total_data_var11.7$amape.France =  abs((Total_data_var11.7$Cases.in.France - Total_data_var11.7$France.cases_fore) / 
+                                  (Total_data_var11.7$Cases.in.France + Total_data_var11.7$France.cases_fore))
+
+tail(Total_data_var11.7, n=14)
+```
+
+
+Error measurement for Italy Covid-19 forecast:
+```{r}
+
+
+Total_data_var11.7$mae.Italy   =  abs(Total_data_var11.7$Cases.in.Italy - Total_data_var11.7$Italy.cases_fore)
+Total_data_var11.7$mse.Italy   =  (Total_data_var11.7$Cases.in.Italy - Total_data_var11.7$Italy.cases_fore) ^ 2
+Total_data_var11.7$mape.Italy  =  abs((Total_data_var11.7$Cases.in.Italy - Total_data_var11.7$Italy.cases_fore)/Total_data_var11.7$Cases.in.Italy)
+Total_data_var11.7$amape.Italy =  abs((Total_data_var11.7$Cases.in.Italy - Total_data_var11.7$Italy.cases_fore) / 
+                                            (Total_data_var11.7$Cases.in.Italy + Total_data_var11.7$Italy.cases_fore))
+
+tail(Total_data_var11.7, n=14)
+
+
+```
+
+
+
+**VAR11 without seasonal dummies.**
+
+Error measurement for France Covid-19 forecast:
+```{r}
+Total_data_var11$mae.France   =  abs(Total_data_var11$Cases.in.France - Total_data_var11$France.cases_fore)
+Total_data_var11$mse.France   =  (Total_data_var11$Cases.in.France - Total_data_var11$France.cases_fore) ^ 2
+Total_data_var11$mape.France  =  abs((Total_data_var11$Cases.in.France - Total_data_var11$France.cases_fore)/Total_data_var11$Cases.in.France)
+Total_data_var11$amape.France =  abs((Total_data_var11$Cases.in.France - Total_data_var11$France.cases_fore) / 
+                                  (Total_data_var11$Cases.in.France + Total_data_var11$France.cases_fore))
+
+tail(Total_data_var11, n=14)
+```
+
+
+
+
+Error measurement for Italy Covid-19 forecast:
+```{r}
+
+
+Total_data_var11$mae.Italy   =  abs(Total_data_var11$Cases.in.Italy - Total_data_var11$Italy.cases_fore)
+Total_data_var11$mse.Italy   =  (Total_data_var11$Cases.in.Italy - Total_data_var11$Italy.cases_fore) ^ 2
+Total_data_var11$mape.Italy  =  abs((Total_data_var11$Cases.in.Italy - Total_data_var11$Italy.cases_fore)/Total_data_var11$Cases.in.Italy)
+Total_data_var11$amape.Italy =  abs((Total_data_var11$Cases.in.Italy - Total_data_var11$Italy.cases_fore) / 
+                                            (Total_data_var11$Cases.in.Italy + Total_data_var11$Italy.cases_fore))
+
+tail(Total_data_var11, n=14)
+
+
+```
+
+
+
+**VAR8 with 7 seasonal dummies.**
+
+
+Error measurement for France Covid-19 forecast:
+```{r}
+Total_data_var8.7$mae.France   =  abs(Total_data_var8.7$Cases.in.France - Total_data_var8.7$France.cases_fore)
+Total_data_var8.7$mse.France   =  (Total_data_var8.7$Cases.in.France - Total_data_var8.7$France.cases_fore) ^ 2
+Total_data_var8.7$mape.France  =  abs((Total_data_var8.7$Cases.in.France - Total_data_var8.7$France.cases_fore)/Total_data_var8.7$Cases.in.France)
+Total_data_var8.7$amape.France =  abs((Total_data_var8.7$Cases.in.France - Total_data_var8.7$France.cases_fore) / 
+                                  (Total_data_var8.7$Cases.in.France + Total_data_var8.7$France.cases_fore))
+
+tail(Total_data_var8.7, n=14)
+```
+
+
+
+
+
+Error measurement for Italy Covid-19 forecast:
+```{r}
+
+
+Total_data_var8.7$mae.Italy   =  abs(Total_data_var8.7$Cases.in.Italy - Total_data_var8.7$Italy.cases_fore)
+Total_data_var8.7$mse.Italy   =  (Total_data_var8.7$Cases.in.Italy - Total_data_var8.7$Italy.cases_fore) ^ 2
+Total_data_var8.7$mape.Italy  =  abs((Total_data_var8.7$Cases.in.Italy - Total_data_var8.7$Italy.cases_fore)/Total_data_var8.7$Cases.in.Italy)
+Total_data_var8.7$amape.Italy =  abs((Total_data_var8.7$Cases.in.Italy - Total_data_var8.7$Italy.cases_fore) / 
+                                            (Total_data_var8.7$Cases.in.Italy + Total_data_var8.7$Italy.cases_fore))
+
+tail(Total_data_var8.7, n=14)
+
+
+```
+
+
+
+**VAR8 without seasonal dummies.**
+
+
+
+Error measurement for France Covid-19 forecast:
+```{r}
+Total_data_var8$mae.France   =  abs(Total_data_var8$Cases.in.France - Total_data_var8$France.cases_fore)
+Total_data_var8$mse.France   =  (Total_data_var8$Cases.in.France - Total_data_var8$France.cases_fore) ^ 2
+Total_data_var8$mape.France  =  abs((Total_data_var8$Cases.in.France - Total_data_var8$France.cases_fore)/Total_data_var8$Cases.in.France)
+Total_data_var8$amape.France =  abs((Total_data_var8$Cases.in.France - Total_data_var8$France.cases_fore) / 
+                                  (Total_data_var8$Cases.in.France + Total_data_var8$France.cases_fore))
+
+tail(Total_data_var8, n=14)
+```
+
+
+
+Error measurement for Italy Covid-19 forecast:
+```{r}
+
+
+Total_data_var8$mae.Italy   =  abs(Total_data_var8$Cases.in.Italy - Total_data_var8$Italy.cases_fore)
+Total_data_var8$mse.Italy   =  (Total_data_var8$Cases.in.Italy - Total_data_var8$Italy.cases_fore) ^ 2
+Total_data_var8$mape.Italy  =  abs((Total_data_var8$Cases.in.Italy - Total_data_var8$Italy.cases_fore)/Total_data_var8$Cases.in.Italy)
+Total_data_var8$amape.Italy =  abs((Total_data_var8$Cases.in.Italy - Total_data_var8$Italy.cases_fore) / 
+                                            (Total_data_var8$Cases.in.Italy + Total_data_var8$Italy.cases_fore))
+
+tail(Total_data_var8, n=14)
+
+
+```
+
+
+Let's calculate the mean value of the errors
+
+# Error means of the models
+
+Error means for the **VAR11 with 7 seasonal dummies**
+```{r}
+colMeans(Total_data_var11.7[, 9:16], na.rm = TRUE)
+```
+
+
+Error means for the **VAR11 without seasonal dummies**
+```{r}
+colMeans(Total_data_var11[, 9:16], na.rm = TRUE)
+```
+
+Error means for the **VAR8 with 7 seasonal dummies**
+```{r}
+colMeans(Total_data_var8.7[, 9:16], na.rm = TRUE)
+```
+
+Error means for the **VAR8 without seasonal dummies**
+```{r}
+colMeans(Total_data_var8[, 9:16], na.rm = TRUE)
+```
+
+
+From the error measurement we can confirm that in mostly all cases our models performs better for predicting the Italian cases of COVID-19.
+All the MAPE and AMAPE values are smaller for the Italy, especially the VAR 11 with and without seasonal dummies seems to perform better result than the VAR8 for Italy forecast.
+Opposite is for the France forecast, in this case the VAR8 with and without seasonal dummies perform better result than for the VAR11.
+It is probable that the forecast of Italy works better bercause of the Granger causality, as we've demonstrated Italy Granger causes France for all lags.
+
+
+Let's now make an analysis for the **SARIMA models**.
+
+Actually we have already demonstrated that our series are Stastionary, so we have not to difference them.
+
+We have also analyzed the ACF and PACF functions of the original data, cut and uncut. Looking at the ACF plot, we can conclude that there is actually a weak seasonal effect, that is a little bit more stronger for the cut data.
+
+From the plots below we would consider to make 2 different models and see which one will perform better: 
+
+ 1) ARMA, because of the non strong seasonal effect
+ 2) SARIMA, because even if it's a weak effect, this seems to exist 
+
+**Uncut data France**
+```{r}
+acf(uncut_data$Cases.in.France,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(uncut_data$Cases.in.France, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+
+**Uncut data Italy**
+```{r}
+acf(uncut_data$Cases.in.Italy,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(uncut_data$Cases.in.Italy, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**Cut data France**
+```{r}
+acf(cut_data$Cases.in.France,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(cut_data$Cases.in.France, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+
+
+**Cut data Italy**
+```{r}
+acf(cut_data$Cases.in.Italy,  
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(cut_data$Cases.in.Italy, 
+lag.max = 48, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+
+# ARMA
+
+Looking at the plots it's really hard to interpret manually which parameters of the AR(p) and MA(q) should we consider.
+If we have to try to guess, we would consider ARMA(3,7) or ARMA(7,7).
+
+Let's try to estimate them.
+
+ARMA(3,7)
+**ARMA(3,7) uncut data: France**
+```{r}
+arma37_uncut_france = arima(uncut_data$Cases.in.France,  
+                  order = c(3, 0, 7)
+                  )
+```
+
+**ARMA(3,7) cut data: France**
+```{r}
+arma37_cut_france = arima(cut_data$Cases.in.France,  
+                  order = c(3, 0, 7)
+                  )
+```
+
+**ARMA(3,7) uncut data: Italy**
+```{r}
+arma37_uncut_italy = arima(uncut_data$Cases.in.Italy,  
+                  order = c(3, 0, 7)
+                  )
+```
+
+**ARMA(3,7) cut data: Italy**
+```{r}
+arma37_cut_italy = arima(cut_data$Cases.in.Italy,  
+                  order = c(3, 0, 7)
+                  )
+```
+
+ARMA(7,7)
+**ARMA(7,7) uncut data: France**
+```{r}
+arma77_uncut_france = arima(uncut_data$Cases.in.France,  
+                  order = c(7, 0, 7)
+                  )
+```
+
+**ARMA(7,7) cut data: France**
+```{r}
+arma77_cut_france = arima(cut_data$Cases.in.France,  
+                  order = c(7, 0, 7), method="ML"
+                  )
+```
+
+**ARMA(7,7) uncut data: Italy**
+```{r}
+arma77_uncut_italy = arima(uncut_data$Cases.in.Italy,  
+                  order = c(7, 0, 7)
+                  )
+```
+
+**ARMA(7,7) cut data: Italy**
+```{r}
+arma77_cut_italy = arima(cut_data$Cases.in.Italy,  
+                  order = c(7, 0, 7), method="ML"
+                  )
+```
+
+
+
+Let's now analyze the significance of the parameters:
+
+**Significance for ARMA(3,7) uncut data: France**
+```{r}
+coeftest(arma37_uncut_france)
+```
+**Significance for ARMA(3,7) cut data: France**
+```{r}
+coeftest(arma37_cut_france)
+```
+
+**Significance for ARMA(3,7) uncut data: Italy**
+```{r}
+coeftest(arma37_uncut_italy)
+```
+**Significance for ARMA(3,7) cut data: Italy**
+```{r}
+coeftest(arma37_cut_italy)
+```
+
+The constant (drift) seems to be significant for all the ARMA(3,7) that we have estimated. Usually there are more significant parameters for the uncut data. For example ARMA(3,7) for Italy all the parameters are significant.
+
+Let's now check the significance of the parameters for ARMA(7,7):
+
+**Significance for ARMA(7,7) uncut data: France**
+```{r}
+coeftest(arma77_uncut_france)
+```
+**Significance for ARMA(7,7) cut data: France**
+```{r}
+coeftest(arma77_cut_france)
+```
+
+**Significance for ARMA(7,7) uncut data: Italy**
+```{r}
+coeftest(arma77_uncut_italy)
+```
+**Significance for ARMA(7,7) cut data: Italy**
+```{r}
+coeftest(arma77_cut_italy)
+```
+
+We have to remove all the parameters that are not significant.
+
+
+ARMA(3,7)
+
+**ARMA(3,7) uncut data: France**
+```{r}
+arma37_uncut_france = arima(uncut_data$Cases.in.France,  
+                  order = c(3, 0, 7),
+                  fixed = c(NA, NA , NA, NA , 0,      
+                              NA, NA , NA, 0 , NA, NA)
+                  )
+```
+
+**ARMA(3,7) cut data: France**
+```{r}
+arma37_cut_france = arima(cut_data$Cases.in.France,  
+                  order = c(3, 0, 7),
+                  fixed = c(NA, 0 , NA, NA , 0,      
+                              NA, NA , 0 , 0 , NA, NA)
+                  )
+```
+
+**ARMA(3,7) uncut data: Italy**
+```{r}
+arma37_uncut_italy = arima(uncut_data$Cases.in.Italy,  
+                  order = c(3, 0, 7)
+                  )
+```
+
+**ARMA(3,7) cut data: Italy**
+```{r}
+arma37_cut_italy = arima(cut_data$Cases.in.Italy,  
+                  order = c(3, 0, 7),
+                  fixed = c(NA, 0 , NA, 0 , 0,      
+                              NA, NA , 0, 0 , NA, NA)
+                  )
+```
+
+ARMA(7,7)
+**ARMA(7,7) uncut data: France**
+```{r}
+arma77_uncut_france = arima(uncut_data$Cases.in.France,  
+                  order = c(7, 0, 7),
+                  fixed = c(NA, 0 , 0, 0 , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, NA, 0)
+                  )
+```
+
+**ARMA(7,7) cut data: France**
+```{r}
+arma77_cut_france = arima(cut_data$Cases.in.France,  
+                  order = c(7, 0, 7),
+                  fixed = c(0, 0 , 0, 0 , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, 0, NA)
+                  )
+```
+
+**ARMA(7,7) uncut data: Italy**
+```{r}
+arma77_uncut_italy = arima(uncut_data$Cases.in.Italy,  
+                  order = c(7, 0, 7),
+                  fixed = c(NA, 0 , NA, 0 , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, 0, 0)
+                  )
+```
+
+**ARMA(7,7) cut data: Italy**
+```{r}
+arma77_cut_italy = arima(cut_data$Cases.in.Italy,  
+                  order = c(7, 0, 7),
+                  fixed = c(0, 0 , NA, NA , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, 0, NA)
+                  )
+```
+
+
+All the parameters are now significant:
+
+
+**ARMA(3,7)**
+```{r}
+coeftest(arma37_uncut_france)
+coeftest(arma37_cut_france)
+
+coeftest(arma37_uncut_italy)
+coeftest(arma37_cut_italy)
+
+```
+
+
+**ARMA(7,7)**
+```{r}
+coeftest(arma77_uncut_france)
+coeftest(arma77_cut_france)
+
+coeftest(arma77_uncut_italy)
+coeftest(arma77_cut_italy)
+```
+
+
+Check the ACF and PACF for the residuals of the models. Some residuals still significant, but much better than the original data, then for the cut data the ARMA(7,7) seems to work very well:
+
+
+ARMA(3,7)
+
+**ARMA(3,7) Uncut data France**
+```{r}
+acf(resid(arma37_uncut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma37_uncut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**ARMA(3,7) cut data France**
+```{r}
+acf(resid(arma37_cut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma37_cut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**ARMA(3,7) Uncut data Italy**
+```{r}
+acf(resid(arma37_uncut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma37_uncut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**ARMA(3,7) cut data Italy**
+```{r}
+acf(resid(arma37_cut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma37_cut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+ARMA(7,7)
+
+**ARMA(7,7) Uncut data France**
+```{r}
+acf(resid(arma77_uncut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma77_uncut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**ARMA(7,7) cut data France**
+```{r}
+acf(resid(arma77_cut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma77_cut_france), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**ARMA(7,7) Uncut data Italy**
+```{r}
+acf(resid(arma77_uncut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma77_uncut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+**ARMA(7,7) cut data Italy**
+```{r}
+acf(resid(arma77_cut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+pacf(resid(arma77_cut_italy), 
+    lag.max = 36, lwd = 7, col = "dark green", na.action = na.pass)
+```
+
+Let's run the **Ljung-Box test** to check if the residuals are autocorrelated.
+
+
+With 20 lags the p-value of ARMA(3,7) is below the critical value of 5%, we can reject the null hypotesis of no correlation between residuals. Same holds for ARMA(7,7) for **uncut** data.
+For ARMA(7,7) the p-value of the LB test for the **cut** data is higher than 5% both for France and Italy, that means we cannot reject the null hypothesis of no correlation between residuals. 
+
+**ARMA(3,7) for France:**
+```{r}
+Box.test(resid(arma37_uncut_france), type = "Ljung-Box", lag = 20)
+Box.test(resid(arma37_cut_france), type = "Ljung-Box", lag = 20)
+```
+
+**ARMA(3,7) for Italy:**
+```{r}
+Box.test(resid(arma37_uncut_italy), type = "Ljung-Box", lag = 20)
+Box.test(resid(arma37_cut_italy), type = "Ljung-Box", lag = 20)
+```
+
+
+**ARMA(7,7) for France:**
+```{r}
+Box.test(resid(arma77_uncut_france), type = "Ljung-Box", lag = 20)
+Box.test(resid(arma77_cut_france), type = "Ljung-Box", lag = 20)
+```
+
+**ARMA(7,7) for Italy:**
+```{r}
+Box.test(resid(arma77_uncut_italy), type = "Ljung-Box", lag = 20)
+Box.test(resid(arma77_cut_italy), type = "Ljung-Box", lag = 20)
+```
+
+Now let's compare the models with Information Criteria AIC and BIC, keeping in mind that, according to Ljung-Box test, ARMA(7,7) for the cut data of France and Italy is the only case with no autocorrelation between residuals.
+There is also a huge difference for the information criteria values of the cut data against uncut data.
+
+For the cut data the best model is ARMA(3,7), meanwhile for the uncut data the best is ARMA(7,7).
+
+
+AIC for France models:
+```{r}
+AIC(arma37_uncut_france, arma37_cut_france, 
+    arma77_uncut_france, arma77_cut_france)
+```
+
+AIC for Italy models:
+```{r}
+AIC(arma37_uncut_italy, arma37_cut_italy,
+    arma77_uncut_italy,arma77_cut_italy)
+```
+
+BIC for France models:
+```{r}
+BIC(arma37_uncut_france, arma37_cut_france, 
+    arma77_uncut_france, arma77_cut_france)
+```
+
+BIC for Italy models:
+```{r}
+BIC(arma37_uncut_italy, arma37_cut_italy,
+    arma77_uncut_italy,arma77_cut_italy)
+```
+
+Let's try to estimate model using the auto.arima() function to see if we can estimate better models for forecast.
+
+**auto.arima() for uncut France data**
+ARMA(6,7) is the best
+```{r}
+arima.best.AIC_uncut_france = 
+  auto.arima(uncut_data$Cases.in.France,
+             d = 0,             
+             max.p = 7,         
+             max.q = 7,         
+             max.order = 14,    
+             start.p = 1,       
+             start.q = 1,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE)      
+```
+**auto.arima() for cut France data**
+ARMA(7,5) is the best
+```{r}
+arima.best.AIC_cut_france = 
+  auto.arima(cut_data$Cases.in.France,
+             d = 0,             
+             max.p = 7,         
+             max.q = 7,         
+             max.order = 14,    
+             start.p = 1,       
+             start.q = 1,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE) 
+
+```
+
+**auto.arima() for uncut Italy data**
+ARMA(5,7) is the best
+```{r}
+arima.best.AIC_uncut_italy = 
+  auto.arima(uncut_data$Cases.in.Italy,
+             d = 0,             
+             max.p = 7,         
+             max.q = 7,         
+             max.order = 14,    
+             start.p = 1,       
+             start.q = 1,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE) 
+
+```
+
+**auto.arima() for cut Italy data**
+ARMA(5,7) is the best
+```{r}
+arima.best.AIC_cut_italy = 
+  auto.arima(cut_data$Cases.in.Italy,
+             d = 0,             
+             max.p = 7,         
+             max.q = 7,         
+             max.order = 14,    
+             start.p = 1,       
+             start.q = 1,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE) 
+
+```
+correlation between residuals for auto arima models:
+```{r}
+Box.test(resid(arima.best.AIC_uncut_france), type = "Ljung-Box", lag = 20)
+Box.test(resid(arima.best.AIC_cut_france), type = "Ljung-Box", lag = 20)
+Box.test(resid(arima.best.AIC_uncut_italy), type = "Ljung-Box", lag = 20)
+Box.test(resid(arima.best.AIC_cut_italy), type = "Ljung-Box", lag = 20)
+
+
+```
+
+
+
+Let's now compare all the models
+
+AIC for France models:
+```{r}
+AIC(arma37_uncut_france, arma37_cut_france, 
+    arma77_uncut_france, arma77_cut_france,
+    arima.best.AIC_uncut_france, arima.best.AIC_cut_france)
+```
+
+
+
+AIC for Italy models:
+```{r}
+AIC(arma37_uncut_italy, arma37_cut_italy,
+    arma77_uncut_italy,arma77_cut_italy,
+    arima.best.AIC_uncut_italy,arima.best.AIC_cut_italy)
+```
+
+
+# Selected ARMA models
+
+Analyzing the information criteria values, the best model that we will select for the forecast will be:
+
+  1) France:
+      -Uncut data: arma77_uncut_france
+      -Cut data: arma77_uncut_france (no correlation between residuals)
+  
+  2) Italy:
+      -Uncut data: arma77_uncut_italy
+      -Cut data: arma77_cut_italy (no correlation between residuals)
+
+
+Let's make the forecast:
+
+
+
+
+**ARMA(7,7) uncut data: France**
+```{r}
+arma77_uncut_france = arima(in_sample_data_uncut$Cases.in.France,  
+                  order = c(7, 0, 7),
+                  fixed = c(NA, 0 , 0, 0 , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, NA, 0)
+                  )
+```
+
+**ARMA(7,7) cut data: France**
+```{r}
+arma77_cut_france = arima(in_sample_data_cut$Cases.in.France,  
+                  order = c(7, 0, 7),
+                  fixed = c(0, 0 , 0, 0 , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, 0, NA)
+                  )
+```
+
+**ARMA(7,7) uncut data: Italy**
+```{r}
+arma77_uncut_italy = arima(in_sample_data_uncut$Cases.in.Italy,  
+                  order = c(7, 0, 7),
+                  fixed = c(NA, 0 , NA, 0 , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, 0, 0)
+                  )
+```
+
+
+**ARMA(7,7) cut data: Italy**
+```{r}
+arma77_cut_italy = arima(in_sample_data_cut$Cases.in.Italy,  
+                  order = c(7, 0, 7),
+                  fixed = c(0, 0 , NA, NA , 0,      
+                              0, NA , NA, NA , NA, NA, NA, NA, 0, NA)
+                  )
+```
+
+
+
+
+```{r}
+f.arma77_uncut_france = forecast(arma77_uncut_france, 
+                      h = 14)
+
+f.arma77_cut_france = forecast(arma77_cut_france, 
+                      h = 14)
+
+f.arma77_uncut_italy = forecast(arma77_uncut_italy, 
+                      h = 14)
+
+f.arma77_cut_italy = forecast(arma77_cut_italy, 
+                      h = 14)
+
+```
+
+
+
+
+Prepare now the data for plotting:
+```{r}
+forecast.arma77_uncut_france = data.frame(f_mean  = as.numeric(f.arma77_uncut_france$mean),
+                             f_lower = as.numeric(f.arma77_uncut_france$lower[, 2]),
+                             f_upper = as.numeric(f.arma77_uncut_france$upper[, 2]))
+
+forecast.arma77_cut_france = 
+  data.frame(f_mean  = as.numeric(f.arma77_cut_france$mean),
+                             f_lower = as.numeric(f.arma77_cut_france$lower[, 2]),
+                             f_upper = as.numeric(f.arma77_cut_france$upper[, 2]))
+
+forecast.arma77_uncut_italy= data.frame(f_mean  = as.numeric(f.arma77_uncut_italy$mean),
+                             f_lower = as.numeric(f.arma77_uncut_italy$lower[, 2]),
+                             f_upper = as.numeric(f.arma77_uncut_italy$upper[, 2]))
+
+
+forecast.arma77_cut_italy= data.frame(f_mean  = as.numeric(f.arma77_cut_italy$mean),
+                             f_lower = as.numeric(f.arma77_cut_italy$lower[, 2]),
+                             f_upper = as.numeric(f.arma77_cut_italy$upper[, 2]))
+```
+
+```{r}
+forecast.arma77_uncut_france.xts <- xts(forecast.arma77_uncut_france,
+                     order.by = date1)
+
+forecast.arma77_cut_france.xts <- xts(forecast.arma77_cut_france,
+                     order.by = date1)
+
+forecast.arma77_uncut_italy.xts <- xts(forecast.arma77_uncut_italy,
+                     order.by = date1)
+
+forecast.arma77_cut_italy.xts <- xts(forecast.arma77_cut_italy,
+                     order.by = date1)
+
+
+```
+
+
+```{r}
+forecast.arma77_uncut_france.xts=merge(forecast.arma77_uncut_france.xts,France_Italy_cut_onlycases$Cases.in.France)
+
+forecast.arma77_cut_france.xts=merge(forecast.arma77_cut_france.xts,France_Italy_cut_onlycases$Cases.in.France)
+
+
+forecast.arma77_uncut_italy.xts=merge(forecast.arma77_uncut_italy.xts,France_Italy_cut_onlycases$Cases.in.Italy)
+
+forecast.arma77_cut_italy.xts=merge(forecast.arma77_cut_italy.xts,France_Italy_cut_onlycases$Cases.in.Italy)
+
+```
+
+```{r}
+forecast.arma77_uncut_france.xts=forecast.arma77_uncut_france.xts["/2022-05-31"]
+forecast.arma77_cut_france.xts=forecast.arma77_cut_france.xts["/2022-05-31"]
+
+
+forecast.arma77_uncut_italy.xts=forecast.arma77_uncut_italy.xts["/2022-05-31"]
+forecast.arma77_cut_italy.xts=forecast.arma77_cut_italy.xts["/2022-05-31"]
+```
+
+```{r}
+head(forecast.arma77_cut_france.xts)
+```
+
+
+# Plot of the forecast and actual values
+
+
+From the plot we can notice that the models that were estimated from the cut data work very well when compared to the "out of sample" plot.
+
+**France**
+ARMA(7,7) trained on uncut data.
+```{r}
+plot(forecast.arma77_uncut_france.xts[, c("Cases.in.France", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, ARMA77",
+     col = c("black", "blue", "red", "red"))
+```
+
+ARMA(7,7) function trained on cut data.
+```{r}
+plot(forecast.arma77_cut_france.xts[, c("Cases.in.France", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, using auto.arima()",
+     col = c("black", "blue", "red", "red"))
+```
+**Italy**
+ARMA(7,7) trained on uncut data.
+```{r}
+plot(forecast.arma77_uncut_italy.xts[, c("Cases.in.Italy", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, ARMA77",
+     col = c("black", "blue", "red", "red"))
+```
+ARMA(7,7) trained on cut data.
+```{r}
+plot(forecast.arma77_cut_italy.xts[, c("Cases.in.Italy", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, ARMA37",
+     col = c("black", "blue", "red", "red"))
+```
+
+# Error measurement
+
+Error measurement for ARMA(7,7) **France** Covid-19 cases, uncut.
+```{r}
+forecast.arma77_uncut_france.xts$mae.France   =  abs(forecast.arma77_uncut_france.xts$Cases.in.France - forecast.arma77_uncut_france.xts$f_mean)
+forecast.arma77_uncut_france.xts$mse.France   =  (forecast.arma77_uncut_france.xts$Cases.in.France - forecast.arma77_uncut_france.xts$f_mean) ^ 2
+forecast.arma77_uncut_france.xts$mape.France  =  abs((forecast.arma77_uncut_france.xts$Cases.in.France - forecast.arma77_uncut_france.xts$f_mean)/forecast.arma77_uncut_france.xts$Cases.in.France)
+forecast.arma77_uncut_france.xts$amape.France =  abs((forecast.arma77_uncut_france.xts$Cases.in.France - forecast.arma77_uncut_france.xts$f_mean) / 
+                                  (forecast.arma77_uncut_france.xts$Cases.in.France + forecast.arma77_uncut_france.xts$f_mean))
+
+tail(forecast.arma77_uncut_france.xts, n=14)
+```
+
+Error measurement for ARMA(7,7) **France** Covid-19 cases, cut.
+```{r}
+forecast.arma77_cut_france.xts$mae.France   =  abs(forecast.arma77_cut_france.xts$Cases.in.France - forecast.arma77_cut_france.xts$f_mean)
+forecast.arma77_cut_france.xts$mse.France   =  (forecast.arma77_cut_france.xts$Cases.in.France - forecast.arma77_cut_france.xts$f_mean) ^ 2
+forecast.arma77_cut_france.xts$mape.France  =  abs((forecast.arma77_cut_france.xts$Cases.in.France - forecast.arma77_cut_france.xts$f_mean)/forecast.arma77_cut_france.xts$Cases.in.France)
+forecast.arma77_cut_france.xts$amape.France =  abs((forecast.arma77_cut_france.xts$Cases.in.France - forecast.arma77_cut_france.xts$f_mean) / 
+                                  (forecast.arma77_cut_france.xts$Cases.in.France + forecast.arma77_cut_france.xts$f_mean))
+
+tail(forecast.arma77_cut_france.xts, n=14)
+```
+
+Error measurement for ARMA(7,7) **Italy** Covid-19 cases, uncut.
+```{r}
+
+forecast.arma77_uncut_italy.xts$mae.Italy   =  abs(forecast.arma77_uncut_italy.xts$Cases.in.Italy - forecast.arma77_uncut_italy.xts$f_mean)
+forecast.arma77_uncut_italy.xts$mse.Italy   =  (forecast.arma77_uncut_italy.xts$Cases.in.Italy - forecast.arma77_uncut_italy.xts$f_mean) ^ 2
+forecast.arma77_uncut_italy.xts$mape.Italy  =  abs((forecast.arma77_uncut_italy.xts$Cases.in.Italy - forecast.arma77_uncut_italy.xts$f_mean)/forecast.arma77_uncut_italy.xts$Cases.in.Italy)
+forecast.arma77_uncut_italy.xts$amape.Italy =  abs((forecast.arma77_uncut_italy.xts$Cases.in.Italy - forecast.arma77_uncut_italy.xts$f_mean) / 
+                                            (forecast.arma77_uncut_italy.xts$Cases.in.Italy + forecast.arma77_uncut_italy.xts$f_mean))
+
+tail(forecast.arma77_uncut_italy.xts, n=14)
+
+```
+
+Error measurement for ARMA(7,7) **Italy** Covid-19 cases, cut.
+```{r}
+
+forecast.arma77_cut_italy.xts$mae.Italy   =  abs(forecast.arma77_cut_italy.xts$Cases.in.Italy - forecast.arma77_cut_italy.xts$f_mean)
+forecast.arma77_cut_italy.xts$mse.Italy   =  (forecast.arma77_cut_italy.xts$Cases.in.Italy - forecast.arma77_cut_italy.xts$f_mean) ^ 2
+forecast.arma77_cut_italy.xts$mape.Italy  =  abs((forecast.arma77_cut_italy.xts$Cases.in.Italy - forecast.arma77_cut_italy.xts$f_mean)/forecast.arma77_cut_italy.xts$Cases.in.Italy)
+forecast.arma77_cut_italy.xts$amape.Italy =  abs((forecast.arma77_cut_italy.xts$Cases.in.Italy - forecast.arma77_cut_italy.xts$f_mean) / 
+                                            (forecast.arma77_cut_italy.xts$Cases.in.Italy + forecast.arma77_cut_italy.xts$f_mean))
+
+tail(forecast.arma77_cut_italy.xts, n=14)
+
+```
+
+Like for the VAR, our models works better for forecasting Italy COVID-19 cases. The values of the "mape" and "amape" are smaller.
+Interesting to notice that the ARMA(7,7) works better than the VAR models.
+
+Error means for the **ARMA(7,7) France, uncut**
+```{r}
+colMeans(forecast.arma77_uncut_france.xts[, 5:8], na.rm = TRUE)
+```
+Error means for the **ARMA(7,7) France, cut**
+```{r}
+colMeans(forecast.arma77_cut_france.xts[, 5:8], na.rm = TRUE)
+```
+
+Error means for the **ARMA(7,7) Italy, uncut**
+```{r}
+colMeans(forecast.arma77_uncut_italy.xts[, 5:8], na.rm = TRUE)
+```
+Error means for the **ARMA(7,7) Italy, cut**
+```{r}
+colMeans(forecast.arma77_cut_italy.xts[, 5:8], na.rm = TRUE)
+```
+
+
+# SARIMA models
+
+let's now try to use the SARIMA models.
+
+First of all we use the sarima manually generated.
+We analyze the significance of the parameters and the plot of ACF and PACF of residuals. As done previously, we present the final parameter models in each case in order to not blow up the notebook. The final parameters were found out by using the Box-Jenkins program. After having found parameters that provide satisfying ACF and PACF plots, we removed insignificant parameters.
+
+**France uncut data**
+
+```{r}
+sarima405110_uncut_france <- 
+  Arima(France_Italy$Cases.in.France,    
+        order    = c(4, 0, 5),  
+        fixed = c(NA,0 , 0, 0,
+                  NA,0 , 0, NA,0 ,
+                  NA),
+        seasonal = list(order = c(1, 1, 0), 
+                        period = 7),
+        include.constant = FALSE)
+
+coeftest(sarima405110_uncut_france)
+
+acf(resid(sarima405110_uncut_france))
+pacf(resid(sarima405110_uncut_france))
+
+```
+
+
+**France cut data**
+```{r}
+sarima200110_cut_france <- 
+  Arima(France_Italy_cut$Cases.in.France,    
+        order    = c(2, 0, 0),  
+        seasonal = list(order = c(0, 1, 0), 
+                        period = 7),
+        include.constant = FALSE)
+
+coeftest(sarima200110_cut_france)
+
+acf(resid(sarima200110_cut_france))
+pacf(resid(sarima200110_cut_france))
+
+```
+
+
+**Italy uncut data**
+```{r}
+sarima606111_uncut_italy <- 
+  Arima(France_Italy$Cases.in.Italy,   
+        order    = c(6, 0, 6),  
+        fixed = c(NA,NA,NA,NA,NA,NA,
+          0,NA,NA,0,NA,NA, 
+          NA,
+          NA),
+        seasonal = list(order = c(1, 1, 1), 
+                        period = 7),
+        include.constant = FALSE)
+
+coeftest(sarima606111_uncut_italy)
+
+acf(resid(sarima606111_uncut_italy))
+pacf(resid(sarima606111_uncut_italy))
+
+```
+
+**Italy cut data**
+```{r}
+sarima104010_cut_italy <- 
+  Arima(France_Italy_cut$Cases.in.Italy,   
+        order    = c(1, 0, 4),  
+        fixed = c(NA,
+                  NA,0 ,0 ,NA
+                  ),
+        seasonal = list(order = c(0, 1, 0), 
+                        period = 7),
+        include.constant = FALSE)
+
+coeftest(sarima104010_cut_italy)
+
+acf(resid(sarima104010_cut_italy))
+pacf(resid(sarima104010_cut_italy))
+
+```
+
+Let's now use the function for the automatic calculation. For this, we need to convert our data into a timeseries object to make use of the seasonal aprt of the automatic arima function. We consider only AIC to not blow up the notebook too much.
+```{r}
+France_ts <-ts(France_Italy$Cases.in.France, frequency=7)
+Italy_ts <-ts(France_Italy$Cases.in.Italy, frequency=7)
+```
+
+
+We put the "auto.arima()" function in the comment sections because it takes too long to run it
+and the results are saved seperately.
+
+**Uncut data France**
+
+'''
+sarima.best.AIC_uncut_france = 
+  auto.arima(France_ts,
+             d = 0,
+             D=1,
+             max.p = 7,         
+             max.q = 7,  
+             max.P = 3,         
+             max.Q = 3,  
+             max.order = 20,    
+             start.p = 0,       
+             start.q = 0,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE) 
+'''
+
+**Uncut data Italy**
+
+'''
+sarima.best.AIC_uncut_italy = 
+  auto.arima(Italy_ts,
+             d = 0,
+             D=1,
+             max.p = 7,         
+             max.q = 7,  
+             max.P = 3,         
+             max.Q = 3,  
+             max.order = 20,    
+             start.p = 0,       
+             start.q = 0,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE) 
+'''
+
+**Cut data France**
+
+'''
+France_ts_cut <-ts(France_Italy_cut$Cases.in.France, frequency=7)
+
+sarima.best.AIC_cut_france = 
+  auto.arima(France_ts_cut,
+             d = 0,
+             D=1,
+             max.p = 7,         
+             max.q = 7,  
+             max.P = 3,         
+             max.Q = 3,  
+             max.order = 20,    
+             start.p = 0,       
+             start.q = 0,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE)
+'''
+
+     
+**Cut data Italy**             
+
+'''
+Italy_ts_cut <-ts(France_Italy_cut$Cases.in.Italy, frequency=7)
+
+sarima.best.AIC_cut_france = 
+  auto.arima(Italy_ts_cut,
+             d = 0,
+             D=1,
+             max.p = 7,         
+             max.q = 7,  
+             max.P = 3,         
+             max.Q = 3,  
+             max.order = 20,    
+             start.p = 0,       
+             start.q = 0,       
+             ic = "aic",        
+             stepwise = FALSE,  
+             allowdrift = TRUE, 
+             trace = TRUE) 
+'''
+
+
+The best models from the "auto.arima()" function are the following. Insignificant parameters have been removed.
+(For the **Cut data of France** the function runs without giving any results, that's why we have only three models instead four):
+
+**SARIMA(206)(213) for uncut data France**
+```{r}
+sarima206213_uncut_france <- 
+  Arima(France_Italy$Cases.in.France,    
+        order    = c(2, 0, 6),  
+        seasonal = list(order = c(2, 1, 3), 
+                        period = 7),
+        include.constant = FALSE)
+
+coeftest(sarima206213_uncut_france)
+
+plot_ACF_PACF_resids(sarima206213_uncut_france)
+```
+
+**SARIMA(405)(213) for uncut data Italy**
+```{r}
+sarima405213_uncut_italy <- 
+  Arima(France_Italy$Cases.in.Italy,    
+        order    = c(4, 0, 5),  
+        fixed = c(NA,NA,NA,NA,
+                  0 ,NA,NA,NA,NA,
+                  NA,NA,
+                  NA,NA,NA),
+        seasonal = list(order = c(2, 1, 3), 
+                        period = 7),
+        include.constant = FALSE)
+
+coeftest(sarima405213_uncut_italy)
+
+plot_ACF_PACF_resids(sarima405213_uncut_italy)
+```
+
+**SARIMA(400)(010) for cut data Italy**
+```{r}
+sarima400010_cut_italy <- 
+  Arima(France_Italy_cut$Cases.in.Italy,    
+        order    = c(4, 0, 0),  
+        fixed = c(NA,NA,0 ,NA),
+        seasonal = list(order = c(0, 1, 0), 
+                        period = 7),
+        include.constant = FALSE)
+coeftest(sarima400010_cut_italy)
+plot_ACF_PACF_resids(sarima400010_cut_italy)
+```
+
+
+Let's check the Information criteria of the models.
+We notice that the cut data outperforms by far.
+```{r}
+AIC(sarima405110_uncut_france,sarima200110_cut_france, sarima206213_uncut_france)
+AIC(sarima606111_uncut_italy, sarima104010_cut_italy, sarima405213_uncut_italy, sarima400010_cut_italy)
+```
+```{r}
+BIC(sarima405110_uncut_france,sarima200110_cut_france, sarima206213_uncut_france)
+BIC(sarima606111_uncut_italy, sarima104010_cut_italy, sarima405213_uncut_italy, sarima400010_cut_italy)
+```
+
+# Selected SARIMA models
+
+Checking the autocorrelation of the residuals.
+
+  - High p-value (no autocorrelation): sarima200110_cut_france, sarima206213_uncut_france,                sarima606111_uncut_italy,  sarima104010_cut_italy, sarima405213_uncut_italy,                     sarima400010_cut_italy
+
+  - Low p-value (autocorrelation): sarima405110_uncut_france
+
+
+sarima405213_uncut_italy is above 5% but only slightly, as it is also one of the models with the much higher AIC and BIC (as for all models incorporating uncut data), it will not be considered anymore as well.
+
+From the models left, the best for each case (country and data horizon) according to information criteria are considered, as for SARIMA models AIC and BIC indicate the same selection.
+
+**Models further considered**: sarima206213_uncut_france,
+sarima200110_cut_france, sarima606111_uncut_italy, sarima104010_cut_italy.
+
+```{r}
+Box.test(resid(sarima405110_uncut_france), type = "Ljung-Box", lag = 20) 
+Box.test(resid(sarima200110_cut_france), type = "Ljung-Box", lag = 20)
+Box.test(resid(sarima206213_uncut_france), type = "Ljung-Box", lag = 20)
+Box.test(resid(sarima606111_uncut_italy), type = "Ljung-Box", lag = 20)
+Box.test(resid(sarima104010_cut_italy), type = "Ljung-Box", lag = 20)
+Box.test(resid(sarima405213_uncut_italy), type = "Ljung-Box", lag = 20)
+Box.test(resid(sarima400010_cut_italy), type = "Ljung-Box", lag = 20)
+```
+
+
+
+Let's now perform the forecasts:
+```{r}
+sarima206213_uncut_france <- 
+  Arima(in_sample_data_uncut$Cases.in.France,    
+        order    = c(2, 0, 6),  
+        seasonal = list(order = c(2, 1, 3), 
+                        period = 7),
+        include.constant = FALSE)
+
+sarima200110_cut_france <- 
+  Arima(in_sample_data_cut$Cases.in.France,    
+        order    = c(2, 0, 0),  
+        seasonal = list(order = c(0, 1, 0), 
+                        period = 7),
+        include.constant = FALSE)
+
+sarima606111_uncut_italy <- 
+  Arima(in_sample_data_uncut$Cases.in.Italy,   
+        order    = c(6, 0, 6),  
+        fixed = c(NA,NA,NA,NA,NA,NA,
+          0,NA,NA,0,NA,NA, 
+          NA,
+          NA),
+        seasonal = list(order = c(1, 1, 1), 
+                        period = 7),
+        include.constant = FALSE)
+
+sarima104010_cut_italy <- 
+  Arima(in_sample_data_cut$Cases.in.Italy,   
+        order    = c(1, 0, 4),  
+        fixed = c(NA,
+                  NA,0 ,0 ,NA
+                  ),
+        seasonal = list(order = c(0, 1, 0), 
+                        period = 7),
+        include.constant = FALSE)
+```
+
+```{r}
+f.sarima206213_uncut_france = forecast(sarima206213_uncut_france, 
+                      h = 14)
+
+f.sarima200110_cut_france = forecast(sarima200110_cut_france, 
+                      h = 14)
+
+f.sarima606111_uncut_italy = forecast(sarima606111_uncut_italy, 
+                      h = 14)
+
+f.sarima104010_cut_italy = forecast(sarima104010_cut_italy, 
+                      h = 14)
+```
+
+```{r}
+forecast.sarima206213_uncut_france = data.frame(f_mean  = as.numeric(f.sarima206213_uncut_france$mean),
+                             f_lower = as.numeric(f.sarima206213_uncut_france$lower[, 2]),
+                             f_upper = as.numeric(f.sarima206213_uncut_france$upper[, 2]))
+
+forecast.sarima200110_cut_france = 
+  data.frame(f_mean  = as.numeric(f.sarima200110_cut_france$mean),
+                             f_lower = as.numeric(f.sarima200110_cut_france$lower[, 2]),
+                             f_upper = as.numeric(f.sarima200110_cut_france$upper[, 2]))
+
+forecast.sarima606111_uncut_italy= data.frame(f_mean  = as.numeric(f.sarima606111_uncut_italy$mean),
+                             f_lower = as.numeric(f.sarima606111_uncut_italy$lower[, 2]),
+                             f_upper = as.numeric(f.sarima606111_uncut_italy$upper[, 2]))
+
+
+forecast.sarima104010_cut_italy= data.frame(f_mean  = as.numeric(f.sarima104010_cut_italy$mean),
+                             f_lower = as.numeric(f.sarima104010_cut_italy$lower[, 2]),
+                             f_upper = as.numeric(f.sarima104010_cut_italy$upper[, 2]))
+```
+
+```{r}
+date1=seq(as.Date("2022-05-18"), as.Date("2022-05-31"), by="days")
+
+forecast.sarima206213_uncut_france.xts <- xts(forecast.sarima206213_uncut_france,
+                     order.by = date1)
+
+forecast.sarima200110_cut_france.xts <- xts(forecast.sarima200110_cut_france,
+                     order.by = date1)
+
+forecast.sarima606111_uncut_italy.xts <- xts(forecast.sarima606111_uncut_italy,
+                     order.by = date1)
+
+forecast.sarima104010_cut_italy.xts <- xts(forecast.sarima104010_cut_italy,
+                     order.by = date1)
+```
+
+```{r}
+
+forecast.sarima206213_uncut_france.xts=merge(forecast.sarima206213_uncut_france.xts,France_Italy_cut_onlycases$Cases.in.France)
+
+forecast.sarima200110_cut_france.xts=merge(forecast.sarima200110_cut_france.xts,France_Italy_cut_onlycases$Cases.in.France)
+
+
+forecast.sarima606111_uncut_italy.xts=merge(forecast.sarima606111_uncut_italy.xts,France_Italy_cut_onlycases$Cases.in.Italy)
+
+forecast.sarima104010_cut_italy.xts=merge(forecast.sarima104010_cut_italy.xts,France_Italy_cut_onlycases$Cases.in.Italy)
+```
+```{r}
+forecast.sarima206213_uncut_france.xts=forecast.sarima206213_uncut_france.xts["/2022-05-31"]
+forecast.sarima200110_cut_france.xts=forecast.sarima200110_cut_france.xts["/2022-05-31"]
+
+
+forecast.sarima606111_uncut_italy.xts=forecast.sarima606111_uncut_italy.xts["/2022-05-31"]
+forecast.sarima104010_cut_italy.xts=forecast.sarima104010_cut_italy.xts["/2022-05-31"]
+```
+
+
+# Plot the forecast and actual values using SARIMA models
+
+**SARIMA(206)(213)**
+```{r}
+plot(forecast.sarima206213_uncut_france.xts[, c("Cases.in.France", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, SARIMA206213",
+     col = c("black", "blue", "red", "red"))
+```
+
+**SARIMA(206)(213)**
+```{r}
+plot(forecast.sarima206213_uncut_france.xts[, c("Cases.in.France", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in France, SARIMA206213",
+     col = c("black", "blue", "red", "red"))
+```
+
+```{r}
+plot(forecast.sarima606111_uncut_italy.xts[, c("Cases.in.Italy", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, SARIMA606111",
+     col = c("black", "blue", "red", "red"))
+```
+
+```{r}
+plot(forecast.sarima104010_cut_italy.xts[, c("Cases.in.Italy", "f_mean",
+                 "f_lower", "f_upper")], 
+     major.ticks = "months", 
+     grid.ticks.on = "months",
+     grid.ticks.lty = 3,
+     main = "14 days of Covid-19 forecast in Italy, SARIMA606111",
+     col = c("black", "blue", "red", "red"))
+```
+#Error measurement for SARIMA models
+
+```{r}
+
+
+
+forecast.sarima206213_uncut_france.xts$mae.France   =  abs(forecast.sarima206213_uncut_france.xts$Cases.in.France - forecast.sarima206213_uncut_france.xts$f_mean)
+forecast.sarima206213_uncut_france.xts$mse.France   =  (forecast.sarima206213_uncut_france.xts$Cases.in.France - forecast.sarima206213_uncut_france.xts$f_mean) ^ 2
+forecast.sarima206213_uncut_france.xts$mape.France  =  abs((forecast.sarima206213_uncut_france.xts$Cases.in.France - forecast.sarima206213_uncut_france.xts$f_mean)/forecast.sarima206213_uncut_france.xts$Cases.in.France)
+forecast.sarima206213_uncut_france.xts$amape.France =  abs((forecast.sarima206213_uncut_france.xts$Cases.in.France - forecast.sarima206213_uncut_france.xts$f_mean) / 
+                                  (forecast.sarima206213_uncut_france.xts$Cases.in.France + forecast.sarima206213_uncut_france.xts$f_mean))
+                                  
+forecast.sarima200110_cut_france.xts$mae.Italy   =  abs(forecast.sarima200110_cut_france.xts$Cases.in.France - forecast.sarima200110_cut_france.xts$f_mean)
+forecast.sarima200110_cut_france.xts$mse.Italy   =  (forecast.sarima200110_cut_france.xts$Cases.in.France - forecast.sarima200110_cut_france.xts$f_mean) ^ 2
+forecast.sarima200110_cut_france.xts$mape.Italy  =  abs((forecast.sarima200110_cut_france.xts$Cases.in.France - forecast.sarima200110_cut_france.xts$f_mean)/forecast.sarima200110_cut_france.xts$Cases.in.France)
+forecast.sarima200110_cut_france.xts$amape.Italy =  abs((forecast.sarima200110_cut_france.xts$Cases.in.France - forecast.sarima200110_cut_france.xts$f_mean) / 
+                                            (forecast.sarima200110_cut_france.xts$Cases.in.France + forecast.sarima200110_cut_france.xts$f_mean))
+
+forecast.sarima606111_uncut_italy.xts$mae.Italy   =  abs(forecast.sarima606111_uncut_italy.xts$Cases.in.Italy - forecast.sarima606111_uncut_italy.xts$f_mean)
+forecast.sarima606111_uncut_italy.xts$mse.Italy   =  (forecast.sarima606111_uncut_italy.xts$Cases.in.Italy - forecast.sarima606111_uncut_italy.xts$f_mean) ^ 2
+forecast.sarima606111_uncut_italy.xts$mape.Italy  =  abs((forecast.sarima606111_uncut_italy.xts$Cases.in.Italy - forecast.sarima606111_uncut_italy.xts$f_mean)/forecast.sarima606111_uncut_italy.xts$Cases.in.Italy)
+forecast.sarima606111_uncut_italy.xts$amape.Italy =  abs((forecast.sarima606111_uncut_italy.xts$Cases.in.Italy - forecast.sarima606111_uncut_italy.xts$f_mean) / 
+                                            (forecast.sarima606111_uncut_italy.xts$Cases.in.Italy + forecast.sarima606111_uncut_italy.xts$f_mean))
+
+forecast.sarima104010_cut_italy.xts$mae.Italy   =  abs(forecast.sarima104010_cut_italy.xts$Cases.in.Italy - forecast.sarima104010_cut_italy.xts$f_mean)
+forecast.sarima104010_cut_italy.xts$mse.Italy   =  (forecast.sarima104010_cut_italy.xts$Cases.in.Italy - forecast.sarima104010_cut_italy.xts$f_mean) ^ 2
+forecast.sarima104010_cut_italy.xts$mape.Italy  =  abs((forecast.sarima104010_cut_italy.xts$Cases.in.Italy - forecast.sarima104010_cut_italy.xts$f_mean)/forecast.sarima104010_cut_italy.xts$Cases.in.Italy)
+forecast.sarima104010_cut_italy.xts$amape.Italy =  abs((forecast.sarima104010_cut_italy.xts$Cases.in.Italy - forecast.sarima104010_cut_italy.xts$f_mean) / 
+                                            (forecast.sarima104010_cut_italy.xts$Cases.in.Italy + forecast.sarima104010_cut_italy.xts$f_mean))
+
+```
+
+
+**SARIMA(206)(213)**
+```{r}
+colMeans(forecast.sarima206213_uncut_france.xts[, 5:8], na.rm = TRUE)
+```
+
+**SARIMA(200)(110)**
+```{r}
+colMeans(forecast.sarima200110_cut_france.xts[, 5:8], na.rm = TRUE)
+
+```
+
+**SARIMA(606)(111)**
+```{r}
+colMeans(forecast.sarima606111_uncut_italy.xts[, 5:8], na.rm = TRUE)
+
+```
+
+**SARIMA(104)(010)**
+```{r}
+colMeans(forecast.sarima104010_cut_italy.xts[, 5:8], na.rm = TRUE)
+
+```
+
+Interestingly, the SARIMA models perform extremely poor. The seasonal differencing seems to have taken away a greater amount of information than what we gained from removing the (weak) seasonal pattern from the data.
+
+
+Let's check again the forecast errors of the best models of each kind to see which one should be selected when making forecasts.
+
+Interesting to see, the VAR model is outperformed by both univariate models for France. Including seasonality did not improve  the forecast, leaving it out actually even improved the forecast marginally. The opposite is true for Italy. Including seasonality for Italy improves forecasts significantly and incorporating France's Covid numbers improves the forecast even more, although interestingly in the VAR model seasonality is not being included. This is also of no surprise, since the Forecast Error Variance Decomposition has shown that the variance of the error is explained by shocks to both Italy and France. Besides the ARMA models, all models worked better when using uncut data. While seasonality could be mentioned as a possible explanation for the SARIMA models, this cannot be done for the VAR model as our best-performing has no seasonality included.
+
+
+#VAR11 without seasonal dummies, uncut
+```{r}
+colMeans(Total_data_var11[, 9:16], na.rm = TRUE)          
+
+```
+
+
+# ARMA(7,7) France, uncut
+```{r}
+colMeans(forecast.arma77_uncut_france.xts[, 5:8], na.rm = TRUE)         
+
+```
+
+
+#ARMA(7,7) Italy, uncut
+```{r}
+colMeans(forecast.arma77_uncut_italy.xts[, 5:8], na.rm = TRUE)         
+
+```
+
+#SARIMA(200)(110), cut
+```{r}
+colMeans(forecast.sarima200110_cut_france.xts[, 5:8], na.rm = TRUE)         
+
+```
+
+#SARIMA(104)(010), cut
+```{r}
+colMeans(forecast.sarima104010_cut_italy.xts[, 5:8], na.rm = TRUE) 
+
+```
+
